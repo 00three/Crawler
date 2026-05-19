@@ -1,0 +1,8 @@
+.git
+.env
+__pycache__/
+*.pyc
+logs/
+temp/
+data/outbox/
+data/processed/

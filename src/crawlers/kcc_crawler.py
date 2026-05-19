@@ -50,7 +50,7 @@ class KccCrawler(BaseCrawler):
                 
                 # 상세 페이지 URL 결정
                 href = title_elem.get('href', '')
-                detail_url = self.normalize_url(href, self.domain)
+                detail_url = self.canonicalize_url(self.normalize_url(href, self.domain))
                 
                 # [델타 크롤링] href에서 boardSeq 추출 및 중복 체크
                 seq_match = re.search(r"boardSeq=(\d+)", href)
@@ -88,7 +88,8 @@ class KccCrawler(BaseCrawler):
                     attachment_text=attachment_text,
                     department=detail_data.get('department'),
                     author=detail_data.get('author'),
-                    image_urls=detail_data.get('image_urls', [])
+                    image_urls=detail_data.get('image_urls', []),
+                    stable_id=seq,
                 )
                 
                 results.append(unified_data)

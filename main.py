@@ -19,22 +19,44 @@ logger = get_logger("Main")
 project_root = os.path.dirname(os.path.abspath(__file__))
 os.chdir(project_root)
 
+DEFAULT_INTERVAL_MINUTES = int(os.getenv("CRAWLER_INTERVAL_MINUTES", "10"))
+DEFAULT_OUTBOX_DIR = os.getenv("CRAWLER_OUTBOX_DIR", "data/outbox")
+
+
+def dedupe_results(results):
+    """한 회차에서 같은 doc_id가 여러 번 나오면 첫 레코드만 유지합니다."""
+    seen = set()
+    deduped = []
+    for item in results:
+        doc_id = item.get("doc_id")
+        if not doc_id or doc_id in seen:
+            continue
+        seen.add(doc_id)
+        deduped.append(item)
+    return deduped
+
+
 def save_to_jsonl(results, filename=None):
-    """수집 결과를 JSONL(JSON Lines) 형식으로 통합 저장합니다."""
+    """수집 결과를 회차별 JSONL 배치 파일로 저장합니다."""
     if not results:
         return
-    
+
+    results = dedupe_results(results)
+    if not results:
+        return
+
     if filename is None:
-        # 날짜별로 파일 생성
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        filename = f"data/results_{date_str}.jsonl"
-        
+        batch_ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
+        filename = os.path.join(DEFAULT_OUTBOX_DIR, f"batch_{batch_ts}.jsonl")
+
     os.makedirs(os.path.dirname(filename), exist_ok=True)
-    
-    with open(filename, 'a', encoding='utf-8') as f:
+
+    tmp_filename = f"{filename}.tmp"
+    with open(tmp_filename, "w", encoding="utf-8") as f:
         for item in results:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
-            
+    os.replace(tmp_filename, filename)
+
     logger.info(f"Saved {len(results)} items to {filename}")
 
 def run_crawler_task(crawler_class, limit=50):
@@ -97,7 +119,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Integrated Web Crawling Agent")
     parser.add_argument("--mode", type=str, choices=["manual", "schedule"], default="manual",
                         help="Execution mode: 'manual' for one-time sequential run, 'schedule' for background scheduler")
-    parser.add_argument("--interval", type=int, default=10, help="Scheduler interval in minutes (default: 10)")
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=DEFAULT_INTERVAL_MINUTES,
+        help=f"Scheduler interval in minutes (default: {DEFAULT_INTERVAL_MINUTES})",
+    )
     parser.add_argument("--limit", type=int, default=25, help="Crawling limit per source (default: 25)")
     
     args = parser.parse_args()

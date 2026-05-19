@@ -57,6 +57,30 @@ class BaseCrawler:
             url = 'https:' + url
         return urllib.parse.urljoin(base_url, url)
 
+    def canonicalize_url(self, url):
+        """세션/추적 파라미터를 제거한 안정적인 URL을 반환합니다."""
+        if not url:
+            return None
+        parsed = urllib.parse.urlparse(url)
+        clean_path = re.sub(r";jsessionid=[^/?#]+", "", parsed.path)
+        params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        filtered = [
+            (k, v)
+            for k, v in params
+            if k.lower() not in {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"}
+        ]
+        clean_query = urllib.parse.urlencode(sorted(filtered))
+        return urllib.parse.urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                clean_path,
+                "",
+                clean_query,
+                "",
+            )
+        )
+
     def format_date(self, raw_date):
         """다양한 날짜 형식을 YYYY-MM-DD로 변환"""
         if not raw_date:
@@ -118,22 +142,33 @@ class BaseCrawler:
         text = re.sub(r'\n+', '\n', text)
         return text
 
-    def make_unified_data(self, title, date, content, url, attachments=None, attachment_text=None, 
-                          department=None, author=None, summary=None, image_urls=None, 
-                          hashtags=None, references=None):
+    @staticmethod
+    def _source_key(source_name):
+        return re.sub(r"[^a-z0-9]+", "_", source_name.lower()).strip("_")
+
+    def make_unified_data(self, title, date, content, url, attachments=None, attachment_text=None,
+                          department=None, author=None, summary=None, image_urls=None,
+                          hashtags=None, references=None, document_kind="press_release",
+                          parent_doc_id=None, stable_id=None, source_override=None):
         """JSON v1 규격에 맞게 데이터 구조화"""
         formatted_date = self.format_date(date)
-        
-        # ID 생성 (원본 URL 해시 + 날짜)
+        source_name = source_override or self.source_name
+
+        canonical_url = self.canonicalize_url(url)
+
+        # ID 생성 (안정 ID 우선, 없으면 canonical URL 해시 + 날짜)
         doc_id = None
-        if url:
-            url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
+        if stable_id or canonical_url:
+            doc_seed = str(stable_id) if stable_id is not None else canonical_url
+            url_hash = hashlib.md5(doc_seed.encode()).hexdigest()[:8]
             clean_date = formatted_date.replace('-', '') if formatted_date else "00000000"
-            doc_id = f"{self.source_name.lower()}_{clean_date}_{url_hash}"
+            doc_id = f"{self._source_key(source_name)}_{clean_date}_{url_hash}"
 
         return {
             "doc_id": doc_id,
-            "source": self.source_name,
+            "source": source_name,
+            "document_kind": document_kind,
+            "parent_doc_id": parent_doc_id,
             "department": department,
             "author": author,
             "title": title.strip() if title else None,
@@ -141,7 +176,7 @@ class BaseCrawler:
             "summary": self.clean_text(summary) if summary else None,
             "content_text": self.clean_text(content) if content else None,
             "attachment_text": attachment_text, # 첨부파일에서 추출한 텍스트
-            "detail_url": url,
+            "detail_url": canonical_url,
             "image_urls": image_urls if image_urls else [],
             "attachments": attachments if attachments else [],
             "hashtags": hashtags if hashtags else [],

@@ -2,6 +2,7 @@ import json
 from bs4 import BeautifulSoup
 from src.crawlers.base_crawler import BaseCrawler
 import urllib.parse
+import re
 
 class NspCrawler(BaseCrawler):
     def __init__(self):
@@ -43,11 +44,12 @@ class NspCrawler(BaseCrawler):
             return []
         
         results = []
+        press_release_count = 0
         seen_ids = set() # 중복 방지용 고유 번호 (idxno 역할)
         newest_id_candidate = None
         
         for i, item in enumerate(items):
-            if len(results) >= limit:
+            if press_release_count >= limit:
                 break
                 
             try:
@@ -81,7 +83,7 @@ class NspCrawler(BaseCrawler):
                 
                 # 첨부파일 텍스트 추출
                 attachment_text = self.process_attachments(detail_data.get('attachments', []))
-                
+
                 unified_data = self.make_unified_data(
                     title=title,
                     date=publish_date,
@@ -91,12 +93,21 @@ class NspCrawler(BaseCrawler):
                     hashtags=hashtag_list,
                     attachments=detail_data.get('attachments', []),
                     attachment_text=attachment_text,
-                    image_urls=detail_data.get('image_urls', [])
+                    image_urls=detail_data.get('image_urls', []),
+                    references=detail_data.get("references", []),
+                    stable_id=control_no,
                 )
 
                 results.append(unified_data)
+                press_release_count += 1
+                results.extend(
+                    self.crawl_reference_articles(
+                        detail_data.get("references", []),
+                        parent_doc_id=unified_data["doc_id"],
+                    )
+                )
                 seen_ids.add(control_no)
-                self.logger.info(f"[{len(results)}/{limit}] Successfully crawled: {title}")
+                self.logger.info(f"[{press_release_count}/{limit}] Successfully crawled: {title}")
                 
             except Exception as e:
                 self.logger.error(f"Error processing item: {e}")
@@ -134,8 +145,8 @@ class NspCrawler(BaseCrawler):
 
         # 첨부파일 추출
         attachments = []
-        file_links = soup.select('a[href*="fileDownload"], a[href*=".pdf"], ul.ref_list_area a.data')
-        
+        file_links = soup.select('a[href*="fileDownload"], a[href*=".pdf"]')
+
         seen_file_urls = set()
         for link in file_links:
             href = link.get('href', '')
@@ -149,9 +160,155 @@ class NspCrawler(BaseCrawler):
                     "file_name": link.get_text(strip=True) or "Download",
                     "download_url": full_url
                 })
+
+        references = []
+        seen_reference_urls = set()
+        for link in soup.select("ul.ref_list_area a.data"):
+            href = link.get("href", "")
+            if not href:
+                continue
+            full_url = self.canonicalize_url(self.normalize_url(href, url))
+            if not full_url or full_url in seen_reference_urls:
+                continue
+            seen_reference_urls.add(full_url)
+            references.append({
+                "ref_title": link.get_text(strip=True) or full_url,
+                "ref_url": full_url,
+            })
         
         return {
             "content": content_text,
             "attachments": attachments,
-            "image_urls": image_urls
+            "image_urls": image_urls,
+            "references": references,
         }
+
+    def crawl_reference_articles(self, references, parent_doc_id, max_depth=2, max_pages=10):
+        """NSP 외부 참고 링크를 독립 문서로 수집합니다."""
+        results = []
+        queue = [
+            (ref.get("ref_url"), 1)
+            for ref in references
+            if ref.get("ref_url")
+        ]
+        visited = set()
+
+        while queue and len(results) < max_pages:
+            url, depth = queue.pop(0)
+            canonical_url = self.canonicalize_url(url)
+            if not canonical_url or canonical_url in visited:
+                continue
+            visited.add(canonical_url)
+
+            article = self.parse_reference_article(canonical_url)
+            if not article:
+                continue
+
+            results.append(
+                self.make_unified_data(
+                    title=article["title"],
+                    date=article.get("date"),
+                    content=article["content"],
+                    url=canonical_url,
+                    author=article.get("author"),
+                    image_urls=article.get("image_urls", []),
+                    references=article.get("references", []),
+                    document_kind="reference_article",
+                    parent_doc_id=parent_doc_id,
+                    stable_id=canonical_url,
+                    source_override=article.get("source"),
+                )
+            )
+
+            if depth >= max_depth:
+                continue
+
+            for next_url in article.get("links", []):
+                canonical_next = self.canonicalize_url(next_url)
+                if canonical_next and canonical_next not in visited:
+                    queue.append((canonical_next, depth + 1))
+
+        return results
+
+    def parse_reference_article(self, url):
+        response = self.fetch_url(url)
+        if not response:
+            return None
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        title = self._meta_content(soup, "property", "og:title")
+        if not title:
+            h1 = soup.find("h1")
+            title = h1.get_text(strip=True) if h1 else None
+        if not title and soup.title:
+            title = soup.title.get_text(strip=True)
+
+        content_elem = (
+            soup.find("article")
+            or soup.select_one('[itemprop="articleBody"]')
+            or soup.select_one(".article-body")
+            or soup.select_one(".article_view")
+            or soup.select_one(".article-body-content")
+            or soup.select_one(".news_end")
+            or soup.select_one("#article-view-content-div")
+        )
+        if not title or not content_elem:
+            return None
+
+        content = self.clean_text(content_elem)
+        if len(content) < 80:
+            return None
+
+        date = (
+            self._meta_content(soup, "property", "article:published_time")
+            or self._meta_content(soup, "name", "date")
+            or self._meta_content(soup, "name", "pubdate")
+        )
+        time_tag = soup.find("time")
+        if not date and time_tag:
+            date = time_tag.get("datetime") or time_tag.get_text(strip=True)
+
+        author = (
+            self._meta_content(soup, "name", "author")
+            or self._meta_content(soup, "property", "article:author")
+        )
+
+        image_urls = []
+        for img in content_elem.select("img"):
+            src = img.get("src") or img.get("data-src")
+            if src:
+                image_urls.append(self.normalize_url(src, url))
+
+        links = []
+        references = []
+        for link in content_elem.select("a[href]"):
+            href = self.normalize_url(link.get("href"), url)
+            if not href or not re.match(r"^https?://", href):
+                continue
+            canonical_href = self.canonicalize_url(href)
+            if canonical_href == self.canonicalize_url(url):
+                continue
+            links.append(canonical_href)
+            references.append({
+                "ref_title": link.get_text(strip=True) or canonical_href,
+                "ref_url": canonical_href,
+            })
+
+        return {
+            "title": title,
+            "date": date,
+            "author": author,
+            "source": (
+                self._meta_content(soup, "property", "og:site_name")
+                or urllib.parse.urlparse(url).netloc.replace("www.", "")
+            ),
+            "content": content,
+            "image_urls": list(dict.fromkeys(filter(None, image_urls))),
+            "links": list(dict.fromkeys(links)),
+            "references": references,
+        }
+
+    @staticmethod
+    def _meta_content(soup, attr_name, attr_value):
+        tag = soup.find("meta", attrs={attr_name: attr_value})
+        return tag.get("content") if tag else None

@@ -46,3 +46,7 @@ Thumbs.db
 
 # Project generated files
 PROGRESS.md
+logs/
+temp/
+data/outbox/
+data/processed/
