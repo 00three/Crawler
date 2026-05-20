@@ -35,4 +35,4 @@ jobs:
             sudo docker compose up -d --build crawler
             sudo docker compose ps crawler
             sudo docker image prune -f
-REMOTE
+          REMOTE
