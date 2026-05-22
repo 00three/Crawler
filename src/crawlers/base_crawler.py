@@ -184,24 +184,52 @@ class BaseCrawler:
             "crawled_at": datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
         }
 
-    def fetch_url(self, url, method="GET", use_delay=True, **kwargs):
-        """공통 HTTP 요청 함수 (차단 방지 로직 포함)"""
+    def fetch_url(self, url, method="GET", use_delay=True, max_retries=4, **kwargs):
+        """공통 HTTP 요청 함수 (차단 방지 + 연결 재시도 로직 포함)
+
+        kcc.go.kr 등 일부 사이트가 간헐적으로 연결을 RST로 끊는다.
+        연결 단계 실패(ConnectionError/Timeout)는 backoff를 두고 재시도하고,
+        HTTP 4xx/5xx 응답은 재시도하지 않는다(재시도해도 동일).
+        """
         if use_delay:
             self.random_delay()
             
-        # 요청마다 다른 User-Agent 설정
-        headers = kwargs.get("headers", {})
-        if "User-Agent" not in headers:
-            headers["User-Agent"] = self._get_random_user_agent()
+        # 호출자가 직접 지정한 헤더는 보존하고, User-Agent는 재시도마다 새로 뽑는다
+        base_headers = dict(kwargs.get("headers") or {})
+        caller_set_ua = "User-Agent" in base_headers
+
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            headers = dict(base_headers)
+            if not caller_set_ua:
+                headers["User-Agent"] = self._get_random_user_agent()
             kwargs["headers"] = headers
 
-        try:
-            response = self.session.request(method, url, timeout=15, **kwargs)
-            response.raise_for_status()
-            return response
-        except Exception as e:
-            self.logger.error(f"Error fetching {url}: {e}")
-            return None
+            try:
+                response = self.session.request(method, url, timeout=15, **kwargs)
+                response.raise_for_status()
+                return response
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ChunkedEncodingError) as e:
+                # 연결 단계 실패 → backoff 후 재시도
+                last_error = e
+                if attempt < max_retries:
+                    wait = min(2 ** (attempt - 1), 8) + random.uniform(0, 1)
+                    self.logger.warning(
+                        f"Connection failed ({attempt}/{max_retries}) for {url}: {e} "
+                        f"→ {wait:.1f}s 후 재시도"
+                    )
+                    time.sleep(wait)
+            except Exception as e:
+                # HTTP 4xx/5xx 등 → 재시도 무의미
+                self.logger.error(f"Error fetching {url}: {e}")
+                return None
+
+        self.logger.error(
+            f"Error fetching {url}: {max_retries}회 재시도 모두 실패 — {last_error}"
+        )
+        return None
 
     def download_file(self, url, save_path):
         """파일 다운로드 함수"""
