@@ -77,15 +77,12 @@ class KccCrawler(BaseCrawler):
                 if not detail_data:
                     continue
                 
-                attachment_text = self.process_attachments(detail_data.get('attachments', []))
-                
                 unified_data = self.make_unified_data(
                     title=title,
                     date=raw_date,
                     content=detail_data['content'],
                     url=detail_url,
                     attachments=detail_data.get('attachments', []),
-                    attachment_text=attachment_text,
                     department=detail_data.get('department'),
                     author=detail_data.get('author'),
                     image_urls=detail_data.get('image_urls', []),

@@ -81,9 +81,6 @@ class NspCrawler(BaseCrawler):
                 hashtags_str = item.get('hashtag', '')
                 hashtag_list = [t.strip() for t in hashtags_str.split(',') if t.strip()] if hashtags_str else []
                 
-                # 첨부파일 텍스트 추출
-                attachment_text = self.process_attachments(detail_data.get('attachments', []))
-
                 unified_data = self.make_unified_data(
                     title=title,
                     date=publish_date,
@@ -92,7 +89,6 @@ class NspCrawler(BaseCrawler):
                     summary=hashtags_str if hashtags_str else None,
                     hashtags=hashtag_list,
                     attachments=detail_data.get('attachments', []),
-                    attachment_text=attachment_text,
                     image_urls=detail_data.get('image_urls', []),
                     references=detail_data.get("references", []),
                     stable_id=control_no,
