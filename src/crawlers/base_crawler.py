@@ -7,12 +7,17 @@ import requests
 import time
 import random
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, date as _date, timedelta
 from src.utils.logger import get_logger
 from src.utils.file_extractor import FileExtractor
 from src.utils.state_manager import StateManager
 
 class BaseCrawler:
+    # 날짜 필터 범위. None 이면 무제한.
+    # 오케스트레이터에서 클래스 단위로 덮어쓰거나 인스턴스 단위로 지정 가능.
+    date_range_start = None  # 포함 (datetime.date)
+    date_range_end = None    # 포함 (datetime.date)
+
     def __init__(self, source_name):
         self.source_name = source_name
         self.logger = get_logger(source_name)
@@ -35,7 +40,7 @@ class BaseCrawler:
         """임의의 User-Agent를 반환합니다."""
         return random.choice(self.user_agents)
 
-    def random_delay(self, min_sec=1.0, max_sec=3.0):
+    def random_delay(self, min_sec=0.25, max_sec=0.75):
         """사이트 차단 방지를 위해 랜덤하게 대기합니다."""
         wait_time = random.uniform(min_sec, max_sec)
         time.sleep(wait_time)
@@ -116,6 +121,35 @@ class BaseCrawler:
         
         return None
 
+    def is_recent_date(self, raw_date, allow_unknown=False):
+        """수집 대상 날짜 범위에 들어오는지 확인.
+
+        date_range_start / date_range_end 가 설정돼 있으면 그 범위(포함) 안인지 확인.
+        둘 다 None 이면 항상 통과(필터 비활성).
+
+        Args:
+            raw_date: 원본 날짜 문자열 (format_date 가 해석할 수 있는 임의 형식)
+            allow_unknown: True 면 파싱 실패 시 통과로 간주(목록 페이지에서 날짜가
+                          없을 수 있는 매체에 대해 사용). False 면 파싱 실패 = 제외.
+        """
+        if self.date_range_start is None and self.date_range_end is None:
+            return True
+
+        formatted = self.format_date(raw_date)
+        if not formatted:
+            return allow_unknown
+
+        try:
+            d = datetime.strptime(formatted, "%Y-%m-%d").date()
+        except ValueError:
+            return allow_unknown
+
+        if self.date_range_start and d < self.date_range_start:
+            return False
+        if self.date_range_end and d > self.date_range_end:
+            return False
+        return True
+
     def clean_text(self, text):
         """기본 텍스트 정제"""
         if not text:
@@ -149,24 +183,31 @@ class BaseCrawler:
     def make_unified_data(self, title, date, content, url, attachments=None, attachment_text=None,
                           department=None, author=None, summary=None, image_urls=None,
                           hashtags=None, references=None, document_kind="press_release",
-                          parent_doc_id=None, stable_id=None, source_override=None):
-        """JSON v1 규격에 맞게 데이터 구조화"""
+                          parent_doc_id=None, stable_id=None, source_override=None,
+                          doc_id=None, company=None):
+        """JSON v1 규격에 맞게 데이터 구조화
+
+        Args:
+            doc_id: 호출자가 직접 지정하는 안정 ID (지정 시 내부 해시 로직 대체).
+            company: 발행 매체명 (뉴스 크롤러에서 Naver처럼 source != publisher 인 경우).
+        """
         formatted_date = self.format_date(date)
         source_name = source_override or self.source_name
 
         canonical_url = self.canonicalize_url(url)
 
-        # ID 생성 (안정 ID 우선, 없으면 canonical URL 해시 + 날짜)
-        doc_id = None
-        if stable_id or canonical_url:
-            doc_seed = str(stable_id) if stable_id is not None else canonical_url
-            url_hash = hashlib.md5(doc_seed.encode()).hexdigest()[:8]
-            clean_date = formatted_date.replace('-', '') if formatted_date else "00000000"
-            doc_id = f"{self._source_key(source_name)}_{clean_date}_{url_hash}"
+        # ID 결정 (호출자 지정 > stable_id > canonical URL 해시)
+        if doc_id is None:
+            if stable_id or canonical_url:
+                doc_seed = str(stable_id) if stable_id is not None else canonical_url
+                url_hash = hashlib.md5(doc_seed.encode()).hexdigest()[:8]
+                clean_date = formatted_date.replace('-', '') if formatted_date else "00000000"
+                doc_id = f"{self._source_key(source_name)}_{clean_date}_{url_hash}"
 
         return {
             "doc_id": doc_id,
             "source": source_name,
+            "company": company,
             "document_kind": document_kind,
             "parent_doc_id": parent_doc_id,
             "department": department,
